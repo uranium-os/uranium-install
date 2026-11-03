@@ -1,0 +1,9 @@
+#!/bin/sh
+# start xfce
+export PATH=/rod/wrappers:/rod/bin:/rod/profile/bin
+export LANG=C.UTF-8
+export XDG_RUNTIME_DIR=/run/user/$(id -u)
+mkdir -p "$XDG_RUNTIME_DIR" && chmod 700 "$XDG_RUNTIME_DIR"
+for f in /nix/store/*-fontconfig-[0-9]*/etc/fonts/fonts.conf; do export FONTCONFIG_FILE=$f; done
+export XDG_DATA_DIRS=/rod/profile/share XDG_CONFIG_DIRS=/rod/profile/etc/xdg
+exec startx -- vt1

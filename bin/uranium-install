@@ -1,0 +1,309 @@
+#!/bin/bash
+# guided installer
+export PATH=/rod/bin:/rod/profile/bin:/rod/init/bin
+set -u
+
+DISK= HOST=uranium USERNAME= USERPASS= ROOTPASS= ZONE=UTC KEYMAP=us PROFILE=minimal EXTRA= FIRMWARE=no ASSUME=
+SRC=/run/live/ro
+[ -d "$SRC/rod" ] || SRC=/
+T=/mnt/uranium
+
+usage() {
+    cat >&2 <<USAGE
+usage: uranium-install [--config FILE] [-y]
+  With no options it asks questions. A config file holds shell variables:
+  DISK HOST USERNAME USERPASS ROOTPASS ZONE KEYMAP PROFILE EXTRA FIRMWARE
+  PROFILE is minimal, server, tools, dev or desktop. -y skips the confirmation.
+USAGE
+    exit 2
+}
+
+die() { echo "uranium-install: $*" >&2; exit 1; }
+
+while [ $# -gt 0 ]; do
+    case $1 in
+        --config) [ -f "${2:-}" ] || usage; . "$2"; shift ;;
+        -y) ASSUME=1 ;;
+        *) usage ;;
+    esac
+    shift
+done
+
+disks() { lsblk -dpno NAME,SIZE,MODEL,TYPE 2> /dev/null | awk '$NF == "disk"'; }
+part() { case $1 in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac; }
+
+eof() { echo >&2; echo "uranium-install: input ended" >&2; kill $$; }
+ask() { printf '%s' "$1" >&2; read -r ans || eof; echo "$ans"; }
+
+# blue menu screens
+BG=$'\e[44m' FG=$'\e[1;93m' RV=$'\e[0;30;46m' RS=$'\e[0m'
+ROWS=24 COLS=80
+size() { read -r r c < <(stty size < /dev/tty 2> /dev/null) && [ "${r:-0}" -gt 0 ] && { ROWS=$r; COLS=$c; }; }
+at() { printf '\e[%d;%dH' "$1" "$2"; }
+screen() { size; printf '%s%s\e[?25l\e[2J' "$BG" "$FG"; at 2 3; printf '%s' "UraniumOS/${ARCH:-amd64} 0.1.0"; }
+text() { # row, then lines
+    row=$1; shift
+    for l in "$@"; do at "$row" 3; printf '%s' "$l"; row=$((row + 1)); done
+}
+wrap() { fold -s -w $((COLS > 78 ? 72 : COLS - 6)); }
+hl() { printf '─%.0s' $(seq 1 "$1"); }
+box() { # box geometry
+    at "$1" "$2"; printf '┌'; hl $(($4 - 2)); printf '┐'
+    for k in $(seq 1 $(($3 - 2))); do at $(($1 + k)) "$2"; printf '│'; at $(($1 + k)) $(($2 + $4 - 1)); printf '│'; done
+    at $(($1 + $3 - 1)) "$2"; printf '└'; hl $(($4 - 2)); printf '┘'
+}
+key() { # read key
+    IFS= read -rsn1 K || eof
+    case $K in
+        $'\e') IFS= read -rsn2 -t 0.05 rest; case $rest in '[A') K=up ;; '[B') K=down ;; '[5') read -rsn1 -t 0.05 _; K=up ;; '[6') read -rsn1 -t 0.05 _; K=down ;; *) K= ;; esac ;;
+        $'\x0e') K=down ;; $'\x10') K=up ;; '') K=enter ;;
+    esac
+}
+# menu -> MENU
+menu() {
+    title=$1; txt=$2; shift 2
+    n=$#; items=("$@"); sel=${MENU_SEL:-0}
+    w=0; for it in "${items[@]}"; do [ ${#it} -gt $w ] && w=${#it}; done; w=$((w + 8))
+    screen; at 2 $((COLS - ${#title} - 2)); printf '%s' "$title"
+    printf '%s\n' "$txt" | wrap > /tmp/.ui.txt; nl=$(wc -l < /tmp/.ui.txt)
+    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    top=$((6 + nl)); left=$(((COLS - w) / 2))
+    box $((top - 1)) $((left - 1)) $((n + 2)) $((w + 2))
+    while :; do
+        for k in $(seq 0 $((n - 1))); do
+            at $((top + k)) "$left"
+            lab=$(echo abcdefghijklmnopqrstuvwxyz | cut -c$((k + 1)))
+            [ "$k" = "$sel" ] && printf '%s' "$RV"
+            printf '%-*s' "$w" " $lab: ${items[$k]}"
+            printf '%s%s%s' "$RS" "$BG" "$FG"
+        done
+        key
+        case $K in
+            up) sel=$(((sel + n - 1) % n)) ;;
+            down) sel=$(((sel + 1) % n)) ;;
+            enter) MENU=$sel; MENU_SEL=$sel; return ;;
+            [a-z]) idx=$(($(printf '%d' "'$K") - 97)); [ $idx -lt $n ] && sel=$idx ;;
+        esac
+    done
+}
+# field -> FIELD
+field() {
+    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > /tmp/.ui.txt
+    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    printf '\e[?25h'; at $((ROWS - 4)) 3; printf '[%s]: ' "$3"; read -r FIELD || eof; FIELD=${FIELD:-$3}
+}
+secret_field() {
+    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > /tmp/.ui.txt
+    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    printf '\e[?25h'; at $((ROWS - 5)) 3; printf 'Password: '; stty -echo 2> /dev/null; read -r p1 || eof; stty echo 2> /dev/null
+    at $((ROWS - 4)) 3; printf 'Again:    '; stty -echo 2> /dev/null; read -r p2 || eof; stty echo 2> /dev/null
+    if [ -z "$p1" ] || [ "$p1" != "$p2" ]; then at $((ROWS - 2)) 3; printf 'Empty or different. Press Enter.'; read -r _; return 1; fi
+    FIELD=$p1
+}
+notice() { printf '\e[?25h'; at $((ROWS - 2)) 3; printf '%s Press Enter.' "$1"; read -r _ || eof; }
+
+ARCH=amd64
+
+# pick -> PICK
+pick() {
+    title=$1; txt=$2; cur=$3; shift 3
+    items=("$@"); n=${#items[@]}; sel=0
+    for k in "${!items[@]}"; do [ "${items[$k]}" = "$cur" ] && sel=$k; done
+    w=0; for it in "${items[@]}"; do [ ${#it} -gt $w ] && w=${#it}; done; w=$((w + 6))
+    screen; at 2 $((COLS - ${#title} - 2)); printf '%s' "$title"
+    printf '%s\n' "$txt" | wrap > /tmp/.ui.txt; nl=$(wc -l < /tmp/.ui.txt)
+    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    top=$((6 + nl)); vh=$((ROWS - top - 3)); [ $vh -gt $n ] && vh=$n
+    left=$(((COLS - w) / 2))
+    box $((top - 1)) $((left - 1)) $((vh + 2)) $((w + 2))
+    while :; do
+        start=$((sel - vh / 2)); [ $start -lt 0 ] && start=0; [ $((start + vh)) -gt $n ] && start=$((n - vh))
+        for k in $(seq 0 $((vh - 1))); do
+            i=$((start + k)); at $((top + k)) "$left"
+            [ "$i" = "$sel" ] && printf '%s' "$RV"
+            printf '%-*s' "$w" "  ${items[$i]}"
+            printf '%s%s%s' "$RS" "$BG" "$FG"
+        done
+        at $((ROWS - 1)) 3; printf '%-60s' "$((sel + 1)) of $n. Type a letter to jump, Enter to choose."
+        key
+        case $K in
+            up) sel=$(((sel + n - 1) % n)) ;;
+            down) sel=$(((sel + 1) % n)) ;;
+            enter) PICK=${items[$sel]}; return ;;
+            [A-Za-z0-9])
+                lk=$(printf '%s' "$K" | tr A-Z a-z)
+                for off in $(seq 1 $n); do
+                    i=$(((sel + off) % n)); f=$(printf '%s' "${items[$i]:0:1}" | tr A-Z a-z)
+                    [ "$f" = "$lk" ] && { sel=$i; break; }
+                done ;;
+        esac
+    done
+}
+
+set_keymap() {
+    maps=$(find /rod/profile/share/keymaps/i386 -name '*.map.gz' 2> /dev/null | sed 's|.*/||; s|\.map\.gz$||' | sort -u)
+    [ -n "$maps" ] || { field "Keyboard" "The name of a console keyboard map, for example us or fi." "$KEYMAP"; loadkeys "$FIELD" > /dev/null 2>&1 && KEYMAP=$FIELD; return; }
+    IFS=$'\n' read -r -d '' -a km <<< "$maps"
+    pick "Keyboard" "Choose your keyboard layout. It is loaded at once." "$KEYMAP" "${km[@]}"
+    loadkeys "$PICK" > /dev/null 2>&1 && KEYMAP=$PICK
+}
+set_host() {
+    while :; do
+        field "Hostname" "The name of this machine on the network. It has letters, digits and hyphens." "$HOST"
+        case $FIELD in
+            -* | *- | *[!A-Za-z0-9-]* | "") notice "Not a valid hostname." ;;
+            *) [ ${#FIELD} -le 63 ] && { HOST=$FIELD; return; }; notice "The hostname is too long." ;;
+        esac
+    done
+}
+set_zone() {
+    Z=/rod/profile/share/zoneinfo
+    regions=$(cd $Z && ls -d */ 2> /dev/null | tr -d / | grep -E '^(Africa|America|Antarctica|Arctic|Asia|Atlantic|Australia|Europe|Indian|Pacific)$')
+    IFS=$'\n' read -r -d '' -a rg <<< "$(printf 'UTC\n%s\n' "$regions")"
+    pick "Time zone" "Choose your region." "${ZONE%%/*}" "${rg[@]}"
+    if [ "$PICK" = UTC ]; then ZONE=UTC; return; fi
+    r=$PICK
+    cities=$(cd $Z/$r && find . -type f | sed 's|^\./||' | sort)
+    IFS=$'\n' read -r -d '' -a ct <<< "$cities"
+    pick "Time zone: $r" "Choose your city." "${ZONE#*/}" "${ct[@]}"
+    ZONE=$r/$PICK
+}
+set_root() { while :; do secret_field "Root password" "The password of the administrator account." && { ROOTPASS=$FIELD; return; }; done; }
+set_user() {
+    while :; do
+        field "User account" "A user in the wheel group can run commands as root with doas. Enter - for no user." "${USERNAME:--}"
+        case $FIELD in
+            -) USERNAME=; USERPASS=; return ;;
+            [a-z_]*) case $FIELD in *[!a-z0-9_-]*) notice "Use lower case letters, digits, - and _." ; continue ;; esac ;;
+            *) notice "The name must start with a lower case letter."; continue ;;
+        esac
+        USERNAME=$FIELD
+        while :; do secret_field "Password for $USERNAME" "" && { USERPASS=$FIELD; return; }; done
+    done
+}
+set_software() {
+    MENU_SEL=0
+    menu "Software" "Choose what is installed on top of the base system." \
+        "minimal  the base system" "server   the base system with the ssh server" "tools    command line tools" \
+        "dev      tools and a compiler toolchain" "desktop  tools and the Xfce desktop"
+    case $MENU in 0) PROFILE=minimal ;; 1) PROFILE=server ;; 2) PROFILE=tools ;; 3) PROFILE=dev ;; 4) PROFILE=desktop ;; esac
+    field "Extra packages" "Package names separated by spaces. Leave empty for none." "${EXTRA:--}"
+    [ "$FIELD" = - ] && EXTRA= || EXTRA=$FIELD
+    MENU_SEL=1; menu "Firmware" "Install firmware for your hardware? This needs the network." "yes" "no"
+    [ "$MENU" = 0 ] && FIRMWARE=yes || FIRMWARE=no
+}
+set_disk() {
+    list=$(disks); [ -n "$list" ] || { notice "No disks found."; return; }
+    IFS=$'\n' read -r -d '' -a dl <<< "$list"
+    MENU_SEL=0; menu "Disk" "Choose the disk that gets the system. It is erased." "${dl[@]}"
+    DISK=$(echo "${dl[$MENU]}" | awk '{ print $1 }')
+}
+
+wizard() {
+    intro="This menu-driven tool is designed to help you install UraniumOS to a hard disk. In the following menus type the reference letter (a, b, c, ...) to select an item, or type CTRL+N/CTRL+P to select the next/previous item. The arrow keys and Page-up/Page-down may also work. Activate the current selection from the menu by typing the enter key."
+    MENU_SEL=0
+    while :; do
+        menu "Main menu" "$intro" \
+            "Keyboard         $KEYMAP" "Hostname         $HOST" "Time zone        $ZONE" \
+            "Root password    $([ -n "$ROOTPASS" ] && echo set || echo "not set")" \
+            "User account     ${USERNAME:-none}" "Software         $PROFILE" \
+            "Disk             ${DISK:-not chosen}" "Install UraniumOS" "Exit"
+        case $MENU in
+            0) set_keymap ;; 1) set_host ;; 2) set_zone ;; 3) set_root ;; 4) set_user ;; 5) set_software ;; 6) set_disk ;;
+            7)
+                [ -n "$DISK" ] || { notice "Choose a disk first."; continue; }
+                [ -n "$ROOTPASS" ] || { notice "Set a root password first."; continue; }
+                MENU_SEL=1; menu "Confirm" "This erases everything on $DISK ($(lsblk -dno SIZE "$DISK" 2> /dev/null)) and installs UraniumOS on it." "Yes, erase the disk and install" "No, go back"
+                [ "$MENU" = 0 ] && break || MENU_SEL=7 ;;
+            8) printf '%s\e[?25h\e[2J\e[H' "$RS"; exit 0 ;;
+        esac
+    done
+    ASSUME=1
+    screen; at 4 1
+}
+
+install_all() {
+    [ -b "$DISK" ] || die "no such disk: $DISK"
+    [ -d /sys/firmware/efi ] || die "this installer needs UEFI"
+    echo "== partitioning $DISK"
+    for m in $(awk -v d="$DISK" '$1 ~ "^" d { print $2 }' /proc/mounts | sort -r); do umount "$m"; done
+    wipefs -af "$DISK" > /dev/null
+    printf 'label: gpt\n,512M,U\n,,L\n' | sfdisk -q "$DISK" || die "partitioning failed"
+    blockdev --rereadpt "$DISK" 2> /dev/null
+    P1=$(part "$DISK" 1); P2=$(part "$DISK" 2)
+    i=0; while [ $i -lt 50 ] && { [ ! -b "$P1" ] || [ ! -b "$P2" ]; }; do sleep 0.2; i=$((i + 1)); done
+    [ -b "$P2" ] || die "partitions did not appear"
+
+    echo "== filesystems"
+    mkfs.vfat -F32 -n URANIUMESP "$P1" > /dev/null || die "mkfs.vfat failed"
+    mkfs.btrfs -q -f -L uranium "$P2" || die "mkfs.btrfs failed"
+    mkdir -p "$T"
+    mount "$P2" "$T" || die "mount failed"
+    btrfs subvolume create "$T/@" > /dev/null
+    btrfs subvolume create "$T/@home" > /dev/null
+    umount "$T"
+    mount -o noatime,subvol=@ "$P2" "$T"
+    mkdir -p "$T/home" "$T/boot" "$T/run/scram/top"
+    mount -o noatime,subvol=@home "$P2" "$T/home"
+    mount "$P1" "$T/boot"
+    mount -o subvolid=5 "$P2" "$T/run/scram/top"
+
+    echo "== copying the system"
+    rsync -aHAX --numeric-ids --exclude='/proc/*' --exclude='/sys/*' --exclude='/dev/*' --exclude='/run/*' --exclude='/tmp/*' --exclude='/mnt/*' --exclude='/boot/*' --exclude='/home/*' --exclude='/rod/containers' "$SRC/" "$T/" || die "copy failed"
+    mkdir -p "$T/proc" "$T/sys" "$T/dev" "$T/run" "$T/tmp" "$T/mnt" "$T/boot" "$T/home" "$T/run/scram/top"
+    chmod 1777 "$T/tmp"
+    : > "$T/etc/fstab"
+    cat > "$T/etc/fstab" <<FSTAB
+LABEL=uranium      /      btrfs  noatime,subvol=@       0 0
+LABEL=uranium      /home  btrfs  noatime,nodev,nosuid,subvol=@home   0 0
+LABEL=URANIUMESP   /boot  vfat   umask=0077,nodev,nosuid,noexec             0 2
+FSTAB
+    rm -f "$T/etc/live"
+
+    echo "== configuring"
+    mount --rbind /dev "$T/dev"; mount -t proc proc "$T/proc"; mount --rbind /sys "$T/sys"
+    cp /etc/resolv.conf "$T/etc/resolv.conf" 2> /dev/null
+    ch() { chroot "$T" /usr/bin/env -i HOME=/root TERM=xterm PATH=/rod/bin:/rod/profile/bin:/rod/init/bin "$@"; }
+    args="--hostname $HOST --timezone $ZONE --keymap $KEYMAP"
+    input=
+    if [ -n "$USERNAME" ]; then args="$args --user $USERNAME"; [ -n "$USERPASS" ] && { args="$args --password-stdin"; input="$USERPASS
+"; }; fi
+    if [ -n "$ROOTPASS" ]; then args="$args --root-password-stdin"; input="$input$ROOTPASS
+"; fi
+    case $PROFILE in server) args="$args --ssh" ;; esac
+    # shellcheck disable=SC2086
+    printf '%s' "$input" | ch /rod/bin/setup $args || die "setup failed"
+
+    echo "== boot menu"
+    ch /rod/bin/scram apply || die "scram apply failed"
+    ch /rod/bin/scram frame -m "fresh install" install || die "first frame failed"
+    ch /rod/bin/scram boot || die "boot menu failed"
+
+    sets=
+    case $PROFILE in tools) sets=@tools ;; dev) sets="@tools @dev" ;; desktop) sets="@tools @xorg @xfce" ;; esac
+    [ "$FIRMWARE" = yes ] && EXTRA="$EXTRA linux-firmware"
+    if [ -n "$sets$EXTRA" ]; then
+        echo "== packages"
+        # shellcheck disable=SC2086
+        if ch /rod/bin/rod +s && ch /rod/bin/rod +i $sets $EXTRA; then :; else echo "packages were not installed, run rod +s and rod +i after the first boot"; fi
+    fi
+
+    if [ "$PROFILE" = desktop ] && [ -n "$USERNAME" ]; then
+        echo "== desktop"
+        ch /rod/bin/uranium-desktop "$USERNAME" || echo "desktop setup failed, run uranium-desktop $USERNAME after the first boot"
+    fi
+
+    echo "== done"
+    sync
+    for m in "$T/dev" "$T/sys" "$T/proc"; do umount -R "$m" 2> /dev/null; done
+    umount -R "$T" 2> /dev/null
+    echo "UraniumOS is installed on $DISK. Remove the medium and reboot."
+}
+
+[ -n "$DISK" ] || [ -n "$ASSUME" ] || wizard
+[ -n "$DISK" ] || die "no disk"
+if [ -z "$ASSUME" ]; then
+    echo "This erases everything on $DISK."
+    [ "$(ask 'type yes to continue: ')" = yes ] || { echo "cancelled"; exit 1; }
+fi
+install_all

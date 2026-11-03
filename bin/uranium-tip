@@ -1,0 +1,5 @@
+#!/bin/sh
+# tip of the login
+f=/rod/share/tips
+[ -r "$f" ] || exit 0
+awk -v s="$(date +%s)$$" 'BEGIN { srand(s) } { a[NR] = $0 } END { if (NR) printf "\nTip: %s\n\n", a[int(rand() * NR) + 1] }' "$f"

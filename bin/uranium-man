@@ -1,0 +1,20 @@
+#!/bin/sh
+# handbook on the live medium
+export PATH=/rod/bin:/rod/profile/bin:/rod/init/bin
+H=/rod/share/handbook
+page=${1:-manual-install}
+if [ ! -d "$H" ]; then
+    url=$(cat /rod/share/site-url 2> /dev/null || echo "the website")
+    echo "The handbook is on the live medium and at $url."
+    exit 1
+fi
+f=$H/$page.html
+if [ ! -f "$f" ]; then
+    echo "uranium-man: no page $page" >&2
+    echo "pages: $(cd "$H" && ls | sed -n 's/\.html$//p' | tr '\n' ' ')" >&2
+    exit 1
+fi
+if [ -n "${DISPLAY:-}" ] && command -v dillo > /dev/null; then exec dillo "$f"; fi
+if command -v lynx > /dev/null; then exec lynx -- "$f"; fi
+echo "uranium-man: no browser installed, the page is $f" >&2
+exit 1

@@ -1,0 +1,29 @@
+#!/bin/sh
+# xfce setup
+export PATH=/rod/bin:/rod/profile/bin:/rod/init/bin
+[ $# -eq 1 ] || { echo "usage: uranium-desktop USER" >&2; exit 2; }
+u=$1; D=/rod/share/desktop
+home=$(awk -F: -v u="$u" '$1 == u { print $6 }' /etc/passwd)
+[ -n "$home" ] || { echo "uranium-desktop: no user $u" >&2; exit 1; }
+
+# devices and bus
+mkdir -p /etc/udev/rules.d /etc/dbus-1/session.d /etc/X11/xorg.conf.d
+cp /rod/profile/var/lib/udev/rules.d/* /etc/udev/rules.d/ 2> /dev/null
+sed '/\/etc\/dbus-1\/session.conf/d' /rod/profile/share/dbus-1/session.conf > /etc/dbus-1/session.conf
+dbus-uuidgen --ensure=/etc/machine-id
+for g in video input; do grep -q "^$g:" /etc/group || addgroup -S "$g"; adduser "$u" "$g" > /dev/null 2>&1; done
+mkdir -p /etc/sv/udevd
+printf '#!/rod/profile/bin/sh\nexport PATH=/rod/profile/bin\nudevd --daemon\nsleep 1\nudevadm trigger\nudevadm settle\nexec sleep infinity\n' > /etc/sv/udevd/run
+chmod +x /etc/sv/udevd/run
+ln -sf /etc/sv/udevd /etc/service/udevd
+
+# where the X server finds its modules and keymaps
+cp "$D/xorg.conf" /etc/X11/xorg.conf.d/10-uranium.conf
+mkdir -p "$home/.config/fontconfig"
+cp "$D/fonts.conf" "$home/.config/fontconfig/fonts.conf"
+echo "exec startxfce4" > "$home/.xinitrc"
+printf '#!/bin/sh\nexec /rod/profile/bin/Xorg -nolisten tcp -keeptty "$@"\n' > "$home/.xserverrc"
+chmod 755 "$home/.xserverrc"
+grep -q uranium-session "$home/.profile" 2> /dev/null || printf '\n[ "$(tty)" = /dev/tty1 ] && exec uranium-session\n' >> "$home/.profile"
+chown -R "$u" "$home/.config" "$home/.xinitrc" "$home/.xserverrc" "$home/.profile"
+echo "xfce ready for $u, log in on the first console"

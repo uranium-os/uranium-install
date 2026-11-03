@@ -1,0 +1,12 @@
+#!/bin/sh
+# fstab by label
+[ $# -eq 1 ] || { echo "usage: genfstab ROOT" >&2; exit 2; }
+r=${1%/}
+awk -v r="$r" '$2 == r || index($2, r "/") == 1 { print $1, $2, $3, $4 }' /proc/mounts | while read -r dev mp fs opts; do
+    case $mp in "$r"/run/*) continue ;; esac
+    lbl=$(blkid -s LABEL -o value "$dev" 2> /dev/null)
+    src=${lbl:+LABEL=$lbl}; src=${src:-$dev}
+    m=${mp#"$r"}; m=${m:-/}
+    pass=0; [ "$m" = /boot ] && pass=2
+    printf '%-18s %-6s %-6s %-22s 0 %s\n' "$src" "$m" "$fs" "$opts" "$pass"
+done

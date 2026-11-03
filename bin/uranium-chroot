@@ -1,0 +1,11 @@
+#!/bin/sh
+# chroot helper
+[ $# -ge 1 ] || { echo "usage: uranium-chroot ROOT [COMMAND ...]" >&2; exit 2; }
+r=$1; shift
+mount --rbind /dev "$r/dev"; mount -t proc proc "$r/proc"; mount --rbind /sys "$r/sys"
+cp /etc/resolv.conf "$r/etc/resolv.conf" 2> /dev/null
+[ $# -gt 0 ] || set -- /rod/profile/bin/bash -l
+chroot "$r" /usr/bin/env -i HOME=/root TERM="${TERM:-xterm}" PATH=/rod/bin:/rod/profile/bin:/rod/init/bin "$@"
+rc=$?
+umount -R "$r/dev" "$r/sys" "$r/proc" 2> /dev/null
+exit $rc

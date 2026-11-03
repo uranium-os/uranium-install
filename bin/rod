@@ -1,0 +1,161 @@
+#!/bin/sh
+# rod bootstrap: installs the first packages, the full rod comes with uranium-tools
+set -u
+
+ROOT=${ROD_ROOT:-/rod}
+PROFILE=$ROOT/profile
+PKGS=$ROOT/nixpkgs
+PIN=$PKGS/.pin
+HOLDS=$ROOT/holds
+LIST=$ROOT/installed
+RECIPES=$ROOT/recipes
+CHANNEL=https://channels.nixos.org/nixos-26.05/nixexprs.tar.xz
+[ -f /etc/rod.conf ] && . /etc/rod.conf
+export PATH="$PATH:$PROFILE/bin"
+for c in "$PROFILE/etc/ssl/certs/ca-bundle.crt" /etc/ssl/certs/ca-bundle.crt; do
+    [ -z "${NIX_SSL_CERT_FILE:-}" ] && [ -f "$c" ] && export NIX_SSL_CERT_FILE=$c
+done
+[ -n "${NIX_SSL_CERT_FILE:-}" ] && export SSL_CERT_FILE=$NIX_SSL_CERT_FILE CURL_CA_BUNDLE=$NIX_SSL_CERT_FILE
+
+die() { echo "rod: $*" >&2; exit 1; }
+need() { [ -f "$PKGS/default.nix" ] || die "no package index, run: rod +s"; }
+
+DRY=
+# dry run
+dry() {
+    out=$("$@" --dry-run 2>&1); rc=$?
+    [ $rc -eq 0 ] || { echo "$out" >&2; return $rc; }
+    echo "$out" | grep -E "installing|uninstalling|upgrading|will be|MiB" || echo "nothing to change"
+    return $rc
+}
+
+# frame before changes
+frame() { [ -z "${ROD_INNER:-}" ] && [ -z "$DRY" ] && command -v scram > /dev/null && scram frame "$1" > /dev/null 2>&1; return 0; }
+
+do_sync() {
+    url=${1:-$CHANNEL}; want=
+    case $url in
+        [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]*)
+            [ ${#url} -eq 40 ] && { want=$url; url=https://github.com/NixOS/nixpkgs/archive/$url.tar.gz; } ;;
+    esac
+    mkdir -p "$ROOT" && rm -rf "$ROOT/nixpkgs.new" && mkdir "$ROOT/nixpkgs.new" || die "cannot write $ROOT"
+    echo "fetching $url"
+    case $url in *.xz) z=J ;; *.gz|*.tgz) z=z ;; *) z= ;; esac
+    curl -fsSL "$url" | tar -x${z} -C "$ROOT/nixpkgs.new" --strip-components=1 || die "download failed"
+    rev=${want:-$(cat "$ROOT/nixpkgs.new/.git-revision" 2> /dev/null)}
+    rm -rf "$ROOT/nixpkgs.old"
+    [ -d "$PKGS" ] && mv "$PKGS" "$ROOT/nixpkgs.old"
+    mv "$ROOT/nixpkgs.new" "$PKGS"
+    rm -rf "$ROOT/nixpkgs.old"
+    printf 'url %s\nrev %s\ndate %s\n' "$url" "$rev" "$(date +%F)" > "$PIN"
+    echo "index at ${rev:-unknown}"
+}
+
+# track requests
+track() { mkdir -p "$ROOT"; for p in "$@"; do grep -qx "$p" "$LIST" 2> /dev/null || echo "$p" >> "$LIST"; done; }
+
+# recipe, hash fix
+recipe() {
+    [ -n "$DRY" ] && { dry nix-env --profile "$PROFILE" -f "$RECIPES/$1.nix" -i; return; }
+    log=$(mktemp)
+    { nix-env --profile "$PROFILE" -f "$RECIPES/$1.nix" -i; echo $? > "$log.rc"; } 2>&1 | tee "$log"
+    rc=$(cat "$log.rc"); got=$(sed -n 's/^ *got: *//p' "$log" | head -n 1); rm -f "$log" "$log.rc"
+    [ "$rc" -ne 0 ] && [ -n "$got" ] || return "$rc"
+    [ "$(grep -c -E '^ *(sha256|hash) *=' "$RECIPES/$1.nix")" -eq 1 ] && [ -t 0 ] || { echo "rod: the source has the hash $got" >&2; return 1; }
+    printf 'rod: set the hash in %s.nix to %s? [y/N] ' "$1" "$got" >&2
+    read -r a; case $a in y|Y) ;; *) return 1 ;; esac
+    sed -i -E "s|^( *)(sha256\|hash) *=.*|\1hash = \"$got\";|" "$RECIPES/$1.nix" && recipe "$1"
+}
+
+# recipes first
+put() {
+    at=
+    for p in "$@"; do
+        if [ -f "$RECIPES/$p.nix" ]; then recipe "$p" || return 1
+        else at="$at $p"; fi
+    done
+    # shellcheck disable=SC2086
+    [ -z "$at" ] || ${DRY:+dry} nix-env --profile "$PROFILE" -f "$PKGS" -iA $at || return 1
+    [ -n "$DRY" ] || track "$@"
+}
+
+# expand @set names
+expand() {
+    for a in "$@"; do
+        case $a in
+            @*) f=${ROD_SETS:-/etc/rod/sets}/${a#@}; [ -f "$f" ] || die "no set $a"; grep -v '^#' "$f" | grep -v '^$' ;;
+            *) echo "$a" ;;
+        esac
+    done
+}
+
+do_install() {
+    [ $# -gt 0 ] || die "+i needs a package"
+    # shellcheck disable=SC2046
+    set -- $(expand "$@")
+    need
+    frame pre-install
+    [ -n "$DRY" ] || for p in "$@"; do [ -f "$HOLDS" ] && sed -i "/^$p\$/d" "$HOLDS"; done
+    put "$@"
+}
+
+do_remove() {
+    [ $# -gt 0 ] || die "+r needs a package"
+    frame pre-remove
+    [ -n "$DRY" ] && { dry nix-env --profile "$PROFILE" -e "$@"; return; }
+    nix-env --profile "$PROFILE" -e "$@" || return 1
+    for p in "$@"; do [ -f "$LIST" ] && sed -i "/^$p\$/d" "$LIST"; done
+    return 0
+}
+
+# installed packages
+do_list() {
+    if [ "${1:-}" = explicit ]; then cat "$LIST" 2> /dev/null || die "no list yet, install something first"
+    else nix-env --profile "$PROFILE" -q; fi
+}
+
+usage() {
+    cat >&2 <<USAGE
+usage: rod [-n] +OP [ARGUMENT ...] ...
+  +i PACKAGE|@SET...   install
+  +r PACKAGE...        remove
+  +s [URL|REV]         sync the index, or pin it to a nixpkgs revision
+  +l [explicit]        list installed, or only what you asked for
+  -n                   first argument: show what +i or +r would change and do nothing
+This is the bootstrap rod. uranium-tools installs the full one.
+USAGE
+    exit 2
+}
+
+known() { case $1 in +i|+r|+s|+l) return 0 ;; esac; return 1; }
+
+# refresh the boot menu
+post() { [ -z "${ROD_INNER:-}" ] && command -v scram > /dev/null && [ -f "${SCRAM_BOOT:-/boot}/limine.conf" ] && scram boot > /dev/null 2>&1; return 0; }
+
+# run the pending operation
+op=; args=
+run() {
+    [ -n "$op" ] || return 0
+    # shellcheck disable=SC2086
+    case $op in
+        +i) do_install $args ;;
+        +r) do_remove $args ;;
+        +s) do_sync $args ;;
+        +l) do_list $args ;;
+    esac
+    st=$?
+    [ $st -eq 0 ] && [ -z "$DRY" ] && case $op in +i|+r) post ;; esac
+    op=; args=
+    return $st
+}
+
+case ${1:-} in -n|--dry-run) DRY=1; shift ;; esac
+[ $# -gt 0 ] || usage
+known "$1" || usage
+if [ -n "$DRY" ]; then
+    for a in "$@"; do known "$a" && case $a in +i|+r) ;; *) die "no dry run for $a" ;; esac; done
+fi
+for a in "$@"; do
+    if known "$a"; then run || exit $?; op=$a; else args="$args $a"; fi
+done
+run || exit $?
