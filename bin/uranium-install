@@ -20,6 +20,9 @@ USAGE
 
 die() { echo "uranium-install: $*" >&2; exit 1; }
 
+UI=$(mktemp) || exit 1
+trap 'rm -f "$UI"' EXIT
+
 while [ $# -gt 0 ]; do
     case $1 in
         --config) [ -f "${2:-}" ] || usage; . "$2"; shift ;;
@@ -65,8 +68,8 @@ menu() {
     n=$#; items=("$@"); sel=${MENU_SEL:-0}
     w=0; for it in "${items[@]}"; do [ ${#it} -gt $w ] && w=${#it}; done; w=$((w + 8))
     screen; at 2 $((COLS - ${#title} - 2)); printf '%s' "$title"
-    printf '%s\n' "$txt" | wrap > /tmp/.ui.txt; nl=$(wc -l < /tmp/.ui.txt)
-    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    printf '%s\n' "$txt" | wrap > "$UI"; nl=$(wc -l < "$UI")
+    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < "$UI"
     top=$((6 + nl)); left=$(((COLS - w) / 2))
     box $((top - 1)) $((left - 1)) $((n + 2)) $((w + 2))
     while :; do
@@ -88,13 +91,13 @@ menu() {
 }
 # field -> FIELD
 field() {
-    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > /tmp/.ui.txt
-    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > "$UI"
+    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < "$UI"
     printf '\e[?25h'; at $((ROWS - 4)) 3; printf '[%s]: ' "$3"; read -r FIELD || eof; FIELD=${FIELD:-$3}
 }
 secret_field() {
-    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > /tmp/.ui.txt
-    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    screen; text 4 "$1" ""; printf '%s\n' "$2" | wrap > "$UI"
+    at 6 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < "$UI"
     printf '\e[?25h'; at $((ROWS - 5)) 3; printf 'Password: '; stty -echo 2> /dev/null; read -r p1 || eof; stty echo 2> /dev/null
     at $((ROWS - 4)) 3; printf 'Again:    '; stty -echo 2> /dev/null; read -r p2 || eof; stty echo 2> /dev/null
     if [ -z "$p1" ] || [ "$p1" != "$p2" ]; then at $((ROWS - 2)) 3; printf 'Empty or different. Press Enter.'; read -r _; return 1; fi
@@ -111,8 +114,8 @@ pick() {
     for k in "${!items[@]}"; do [ "${items[$k]}" = "$cur" ] && sel=$k; done
     w=0; for it in "${items[@]}"; do [ ${#it} -gt $w ] && w=${#it}; done; w=$((w + 6))
     screen; at 2 $((COLS - ${#title} - 2)); printf '%s' "$title"
-    printf '%s\n' "$txt" | wrap > /tmp/.ui.txt; nl=$(wc -l < /tmp/.ui.txt)
-    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < /tmp/.ui.txt
+    printf '%s\n' "$txt" | wrap > "$UI"; nl=$(wc -l < "$UI")
+    at 4 1; while IFS= read -r l; do printf '   %s\r\n' "$l"; done < "$UI"
     top=$((6 + nl)); vh=$((ROWS - top - 3)); [ $vh -gt $n ] && vh=$n
     left=$(((COLS - w) / 2))
     box $((top - 1)) $((left - 1)) $((vh + 2)) $((w + 2))
