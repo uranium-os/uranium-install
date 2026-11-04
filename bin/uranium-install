@@ -32,7 +32,7 @@ while [ $# -gt 0 ]; do
     shift
 done
 
-disks() { lsblk -dpno NAME,SIZE,MODEL,TYPE 2> /dev/null | awk '$NF == "disk"'; }
+disks() { lsblk -dpno NAME,SIZE,MODEL,TYPE 2> /dev/null | awk '$NF == "disk" && $1 !~ /zram|\/ram/'; }
 part() { case $1 in *[0-9]) echo "${1}p$2" ;; *) echo "$1$2" ;; esac; }
 
 eof() { echo >&2; echo "uranium-install: input ended" >&2; kill $$; }
@@ -43,7 +43,7 @@ BG=$'\e[44m' FG=$'\e[1;93m' RV=$'\e[0;30;46m' RS=$'\e[0m'
 ROWS=24 COLS=80
 size() { read -r r c < <(stty size < /dev/tty 2> /dev/null) && [ "${r:-0}" -gt 0 ] && { ROWS=$r; COLS=$c; }; }
 at() { printf '\e[%d;%dH' "$1" "$2"; }
-screen() { size; printf '%s%s\e[?25l\e[2J' "$BG" "$FG"; at 2 3; printf '%s' "UraniumOS/${ARCH:-amd64} 0.1.0"; }
+screen() { size; printf '%s%s\e[?25l\e[2J' "$BG" "$FG"; at 2 3; printf '%s' "UraniumOS/${ARCH:-amd64} 0.1.1"; }
 text() { # row, then lines
     row=$1; shift
     for l in "$@"; do at "$row" 3; printf '%s' "$l"; row=$((row + 1)); done
